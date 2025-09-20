@@ -1,0 +1,79 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.android.tools.build:gradle:8.6.1"
+    }
+}
+
+apply plugin: 'com.android.library'
+
+def cppFlags = [
+    "-std=c++20",
+    "-fno-stack-protector",
+    "-fno-exceptions",
+    "-fno-unwind-tables",
+    "-fno-asynchronous-unwind-tables",
+    "-fno-rtti",
+    "-ffast-math",
+    "-fno-finite-math-only",
+    "-ffp-contract=fast",
+    "-fvisibility-inlines-hidden",
+    "-fvisibility=hidden",
+    "-fomit-frame-pointer",
+    "-ffunction-sections",
+    "-fdata-sections",
+    "-no-canonical-prefixes",
+    "-Wformat",
+    "-Werror=format-security",
+    "-Wno-unused-command-line-argument",
+    "-Wl,--gc-sections",
+    "-Wl,-Bsymbolic-functions",
+    '-Wl,-dead_strip',
+    "-Wl,--hash-style=both", // Required to support API levels below 23
+]
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+android {
+    namespace "com.letary.creatorpkg"
+    compileSdkVersion 34
+    ndkVersion '29.0.13113456'
+    buildToolsVersion '35.0.0'
+
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 34
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static',
+                          '-DCMAKE_BUILD_TYPE=Release',
+                          '-DANDROID_PLATFORM=21',
+                          '-DANDROID_PIE=ON',
+                          '-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON'
+                cppFlags.addAll(cppFlags)
+            }
+        }
+    }
+
+    compileOptions {
+        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_1_8
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "CMakeLists.txt"
+        }
+    }
+}
