@@ -1087,112 +1087,146 @@ static void pixels_setup(struct quirc *q, uint8_t threshold)
 	}
 }
 
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
 static void adaptive_binarize(struct quirc *q, int window_size, float t)
 {
-	if (!q || !q->image) return;
+    if (!q || !q->image) return;
 
-	const int W = q->w;
-	const int H = q->h;
-	if (W <= 0 || H <= 0) return;
+    const int W = q->w;
+    const int H = q->h;
+    if (W <= 0 || H <= 0) return;
 
-	/* нормализация параметров */
-	if (!(t > 0.0f && t < 1.0f)) t = 0.15f;
-	if (window_size <= 0) {
-		int min_dim = (W < H) ? W : H;
-		window_size = min_dim / 8;
-		if (window_size < 15) window_size = 15;
-	}
-	if ((window_size & 1) == 0) ++window_size; /* нечётное окно */
-	if (window_size > (W < H ? W : H)) window_size = (W < H ? W : H);
-	const int half = window_size / 2;
+    // --- параметры ---
+    // t трактуем как k в Sauvola. Типично 0.34.
+    float k = (t > 0.0f && t < 1.0f) ? t : 0.34f;
 
-	/* подготовка интегрального массива: (H+1) x (W+1) */
-	const size_t stride = (size_t)W + 1;
-	const size_t rows = (size_t)H + 1;
-	/* проверим на возможный overflow в умножении */
-	if (stride == 0 || rows == 0) {
-		uint8_t thr = otsu(q);
-		pixels_setup(q, thr);
-		return;
-	}
-	const size_t integral_elems = stride * rows;
-	if (integral_elems / stride != rows) {
-		/* переполнение size_t — откат */
-		uint8_t thr = otsu(q);
-		pixels_setup(q, thr);
-		return;
-	}
+    // window_size: чуть более "осторожная" эвристика, чем min_dim/8
+    if (window_size <= 0) {
+        int min_dim = (W < H) ? W : H;
+        window_size = min_dim / 16;
+        if (window_size < 21) window_size = 21;
+        if (window_size > 101) window_size = 101;
+    }
+    if ((window_size & 1) == 0) ++window_size; // нечётное
+    int min_dim = (W < H) ? W : H;
+    if (window_size > min_dim) window_size = (min_dim | 1); // тоже нечётное
+    const int half = window_size / 2;
 
-	uint64_t *integral = (uint64_t *)malloc(integral_elems * sizeof(uint64_t));
-	if (!integral) {
-		uint8_t thr = otsu(q);
-		pixels_setup(q, thr);
-		return;
-	}
-	memset(integral, 0, integral_elems * sizeof(uint64_t));
+    // --- integral размеры (H+1)*(W+1) ---
+    const size_t stride = (size_t)W + 1;
+    const size_t rows = (size_t)H + 1;
+    if (stride == 0 || rows == 0) {
+        uint8_t thr = otsu(q);
+        pixels_setup(q, thr);
+        return;
+    }
+    const size_t n = stride * rows;
+    if (n / stride != rows) {
+        uint8_t thr = otsu(q);
+        pixels_setup(q, thr);
+        return;
+    }
 
-	/* построение интегрального изображения (uint64_t чтобы не было переполнения) */
-	for (int y = 1; y <= H; ++y) {
-		uint64_t rowsum = 0;
-		const uint8_t *src = q->image + (size_t)(y - 1) * (size_t)W;
-		uint64_t *dst = integral + (size_t)y * stride;
-		uint64_t *prev = integral + (size_t)(y - 1) * stride;
-		dst[0] = 0;
-		for (int x = 1; x <= W; ++x) {
-			rowsum += src[x - 1];
-			/* dst[x] = integral[y-1][x] + rowsum */
-			dst[x] = prev[x] + rowsum;
-		}
-	}
+    // sum и sumsq (uint64 достаточно: max sumsq ~ 65025 * (W*H), для разумных размеров влезает)
+    uint64_t *integral  = (uint64_t*)malloc(n * sizeof(uint64_t));
+    uint64_t *integral2 = (uint64_t*)malloc(n * sizeof(uint64_t));
+    if (!integral || !integral2) {
+        free(integral);
+        free(integral2);
+        uint8_t thr = otsu(q);
+        pixels_setup(q, thr);
+        return;
+    }
+    memset(integral,  0, n * sizeof(uint64_t));
+    memset(integral2, 0, n * sizeof(uint64_t));
 
-	/* если конфигурация алиасит пиксели в image, установим указатель */
+    // --- построение интегральных изображений ---
+    for (int y = 1; y <= H; ++y) {
+        uint64_t rowsum  = 0;
+        uint64_t rowsum2 = 0;
+
+        const uint8_t *src = q->image + (size_t)(y - 1) * (size_t)W;
+        uint64_t *dst  = integral  + (size_t)y * stride;
+        uint64_t *dst2 = integral2 + (size_t)y * stride;
+        uint64_t *prev  = integral  + (size_t)(y - 1) * stride;
+        uint64_t *prev2 = integral2 + (size_t)(y - 1) * stride;
+
+        dst[0] = 0;
+        dst2[0] = 0;
+
+        for (int x = 1; x <= W; ++x) {
+            const uint8_t v = src[x - 1];
+            rowsum  += (uint64_t)v;
+            rowsum2 += (uint64_t)v * (uint64_t)v;
+
+            dst[x]  = prev[x]  + rowsum;
+            dst2[x] = prev2[x] + rowsum2;
+        }
+    }
+
 #ifdef QUIRC_PIXEL_ALIAS_IMAGE
-	q->pixels = (quirc_pixel_t *)q->image;
+    q->pixels = (quirc_pixel_t *)q->image;
 #endif
+    if (!q->pixels) {
+        free(integral);
+        free(integral2);
+        uint8_t thr = otsu(q);
+        pixels_setup(q, thr);
+        return;
+    }
 
-	/* q->pixels должен быть валидным — иначе fallback */
-	if (!q->pixels) {
-		free(integral);
-		uint8_t thr = otsu(q);
-		pixels_setup(q, thr);
-		return;
-	}
+    // Sauvola constants
+    // Для 8-bit принято R=128.0 (иногда 64..128). 128 обычно норм для QR.
+    const double R = 128.0;
+    const double kd = (double)k;
 
-	const double inv = 1.0 - (double)t;
+    // --- основной проход ---
+    for (int y = 0; y < H; ++y) {
+        int y1 = y - half; if (y1 < 0) y1 = 0;
+        int y2 = y + half; if (y2 >= H) y2 = H - 1;
 
-	/* основной проход: для каждого pixels вычисляем локальный mean и сравниваем */
-	for (int y = 0; y < H; ++y) {
-		int y1 = y - half; if (y1 < 0) y1 = 0;
-		int y2 = y + half; if (y2 >= H) y2 = H - 1;
+        const size_t y2p = (size_t)(y2 + 1);
+        const size_t y1p = (size_t)(y1);
 
-		for (int x = 0; x < W; ++x) {
-			int x1 = x - half; if (x1 < 0) x1 = 0;
-			int x2 = x + half; if (x2 >= W) x2 = W - 1;
+        for (int x = 0; x < W; ++x) {
+            int x1 = x - half; if (x1 < 0) x1 = 0;
+            int x2 = x + half; if (x2 >= W) x2 = W - 1;
 
-			/* integral indices (смещение +1 для интегральной матрицы) */
-			const size_t A = (size_t)(y2 + 1) * stride + (size_t)(x2 + 1);
-			const size_t B = (size_t)(y1)     * stride + (size_t)(x2 + 1);
-			const size_t C = (size_t)(y2 + 1) * stride + (size_t)(x1);
-			const size_t D = (size_t)(y1)     * stride + (size_t)(x1);
+            const size_t x2p = (size_t)(x2 + 1);
+            const size_t x1p = (size_t)(x1);
 
-			const uint64_t sum = integral[A] - integral[B] - integral[C] + integral[D];
-			const uint32_t count = (uint32_t)((y2 - y1 + 1) * (x2 - x1 + 1));
+            const size_t A = y2p * stride + x2p;
+            const size_t B = y1p * stride + x2p;
+            const size_t C = y2p * stride + x1p;
+            const size_t D = y1p * stride + x1p;
 
-			const uint8_t pix = q->image[(size_t)y * (size_t)W + (size_t)x];
+            const uint64_t sum   = integral[A]  - integral[B]  - integral[C]  + integral[D];
+            const uint64_t sumsq = integral2[A] - integral2[B] - integral2[C] + integral2[D];
 
-			const double mean = (double)sum / (double)count;
-			const double thresh = mean * inv;
+            const uint32_t count = (uint32_t)((y2 - y1 + 1) * (x2 - x1 + 1));
+            const uint8_t pix = q->image[(size_t)y * (size_t)W + (size_t)x];
 
-			/* сравнение и запись в q->pixels */
-			if ((double)pix <= thresh) {
-				q->pixels[(size_t)y * (size_t)W + (size_t)x] = QUIRC_PIXEL_BLACK;
-			} else {
-				q->pixels[(size_t)y * (size_t)W + (size_t)x] = QUIRC_PIXEL_WHITE;
-			}
-		}
-	}
+            // mean & stddev
+            const double mean = (double)sum / (double)count;
+            double var = ((double)sumsq / (double)count) - mean * mean;
+            if (var < 0.0) var = 0.0; // численная защита
+            const double stddev = sqrt(var);
 
-	free(integral);
+            // Sauvola threshold
+            const double thresh = mean * (1.0 + kd * (stddev / R - 1.0));
+
+            // Запись (QR обычно: тёмное <= thresh => BLACK)
+            q->pixels[(size_t)y * (size_t)W + (size_t)x] =
+                ((double)pix <= thresh) ? QUIRC_PIXEL_BLACK : QUIRC_PIXEL_WHITE;
+        }
+    }
+
+    free(integral);
+    free(integral2);
 }
 
 uint8_t *quirc_begin(struct quirc *q, int *w, int *h)
@@ -1215,7 +1249,7 @@ void quirc_end(struct quirc *q)
 
 	// uint8_t threshold = otsu(q);
 	// pixels_setup(q, threshold);
-	adaptive_binarize(q, 0, 0.15f);
+	adaptive_binarize(q, 0, 0.34f);
 
 	for (i = 0; i < q->h; i++)
 		finder_scan(q, i);

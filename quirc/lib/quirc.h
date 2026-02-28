@@ -44,6 +44,8 @@ void quirc_destroy(struct quirc *q);
  */
 int quirc_resize(struct quirc *q, int w, int h);
 
+void get_binary(struct quirc *q, unsigned char* out, int w, int h);
+
 /* These functions are used to process images for QR-code recognition.
  * quirc_begin() must first be called to obtain access to a buffer into
  * which the input image should be placed. Optionally, the current

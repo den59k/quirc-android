@@ -145,6 +145,13 @@ int quirc_count(const struct quirc *q)
 	return q->num_grids;
 }
 
+void get_binary(struct quirc *q, unsigned char* out, int w, int h)
+{
+	for (int i = 0; i < w * h; ++i) {
+			out[i] = q->image[i] ? 0 : 255;
+	}
+}
+
 static const char *const error_table[] = {
 	[QUIRC_SUCCESS] = "Success",
 	[QUIRC_ERROR_INVALID_GRID_SIZE] = "Invalid grid size",
