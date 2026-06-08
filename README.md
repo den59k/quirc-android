@@ -14,6 +14,16 @@ The C library has been slightly modified to improve decoding robustness on mobil
 
 ---
 
+## Build
+
+```
+./gradlew assembleRelease
+```
+
+Output file will be in build/outputs/aar/quirc-release.aar
+
+---
+
 ## Usage Example
 
 ```java

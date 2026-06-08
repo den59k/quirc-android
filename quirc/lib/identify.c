@@ -1229,6 +1229,29 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
     free(integral2);
 }
 
+static void quirc_reset_state(struct quirc *q) {
+    q->num_regions   = QUIRC_PIXEL_REGION;  // 2
+    q->num_capstones = 0;
+    q->num_grids     = 0;
+}
+
+static int attempt(struct quirc *q) {
+    int i;
+    for (i = 0; i < q->h; i++)            finder_scan(q, i);
+    for (i = 0; i < q->num_capstones; i++) test_grouping(q, i);
+
+    int count = quirc_count(q);
+    for (i = 0; i < count; i++) {
+        struct quirc_code code;
+        struct quirc_data data;
+        quirc_extract(q, i, &code);
+        if (quirc_decode(&code, &data) == QUIRC_SUCCESS)
+            return 1;            // реально прочитали
+    }
+    return 0;
+}
+
+
 uint8_t *quirc_begin(struct quirc *q, int *w, int *h)
 {
 	q->num_regions = QUIRC_PIXEL_REGION;
@@ -1243,19 +1266,22 @@ uint8_t *quirc_begin(struct quirc *q, int *w, int *h)
 	return q->image;
 }
 
-void quirc_end(struct quirc *q)
-{
-	int i;
-
-	// uint8_t threshold = otsu(q);
-	// pixels_setup(q, threshold);
-	adaptive_binarize(q, 0, 0.34f);
-
-	for (i = 0; i < q->h; i++)
-		finder_scan(q, i);
-
-	for (i = 0; i < q->num_capstones; i++)
-		test_grouping(q, i);
+void quirc_end(struct quirc *q) {
+    static const struct { int win; float k; } passes[] = {
+        {  0, 0.34f },   // авто-окно
+        { 41, 0.34f },   // крупное фиксированное (близкий QR, лечит выедание finder)
+        {  0, 0.18f },   // мягче к фону (бледный/низкоконтрастный QR)
+    };
+    for (size_t p = 0; p < sizeof(passes)/sizeof(*passes); ++p) {
+        quirc_reset_state(q);
+        adaptive_binarize(q, passes[p].win, passes[p].k);
+        if (attempt(q)) return;
+    }
+    // финальный фолбэк — глобальный Otsu (он иногда берёт кадры,
+    // где локалка наоборот шумит)
+    quirc_reset_state(q);
+    pixels_setup(q, otsu(q));
+    attempt(q);
 }
 
 void quirc_extract(const struct quirc *q, int index,
