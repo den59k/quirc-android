@@ -37,6 +37,7 @@ struct quirc *quirc_new(void)
 void quirc_destroy(struct quirc *q)
 {
 	free(q->image);
+	free(q->gray);
 	/* q->pixels may alias q->image when their type representation is of the
 	   same size, so we need to be careful here to avoid a double free */
 	if (!QUIRC_PIXEL_ALIAS_IMAGE)
@@ -48,6 +49,7 @@ void quirc_destroy(struct quirc *q)
 int quirc_resize(struct quirc *q, int w, int h)
 {
 	uint8_t		*image  = NULL;
+	uint8_t		*gray   = NULL;
 	quirc_pixel_t	*pixels = NULL;
 	size_t num_vars;
 	size_t vars_byte_size;
@@ -68,6 +70,11 @@ int quirc_resize(struct quirc *q, int w, int h)
 	 */
 	image = calloc(w, h);
 	if (!image)
+		goto fail;
+
+	/* буфер для сохранения исходных полутонов (см. struct quirc::gray) */
+	gray = calloc(w, h);
+	if (!gray)
 		goto fail;
 
 	/* compute the "old" (i.e. currently allocated) and the "new"
@@ -122,6 +129,8 @@ int quirc_resize(struct quirc *q, int w, int h)
 	q->h = h;
 	free(q->image);
 	q->image = image;
+	free(q->gray);
+	q->gray = gray;
 	if (!QUIRC_PIXEL_ALIAS_IMAGE) {
 		free(q->pixels);
 		q->pixels = pixels;
@@ -134,6 +143,7 @@ int quirc_resize(struct quirc *q, int w, int h)
 	/* NOTREACHED */
 fail:
 	free(image);
+	free(gray);
 	free(pixels);
 	free(vars);
 

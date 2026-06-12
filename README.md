@@ -14,6 +14,34 @@ The C library has been slightly modified to improve decoding robustness on mobil
 
 ---
 
+## Adaptive binarization (Wolf–Jolion)
+
+Instead of a single global threshold, this fork uses a **local adaptive
+threshold based on the Wolf–Jolion method** (an evolution of Sauvola), which is
+far more robust to uneven lighting, glare and moiré — especially for QR codes
+shown on another screen.
+
+The threshold is anchored to the global brightness minimum `M` and normalized by
+the maximum local standard deviation `Rmax`:
+
+```
+thresh = mean - k * (1 - stddev / Rmax) * (mean - M)
+```
+
+This keeps flat dark areas **black** (finder-pattern centers are no longer
+"eaten" into white) and flat bright areas **white**. Mean/variance are computed
+in O(1) per pixel via integral images. Default `k = 0.5`.
+
+Two extra details improve real-world reads:
+
+- **Multi-pass:** binarization runs with several window/`k` settings
+  (`auto/0.5`, `41/0.5`, `auto/0.3`) and stops at the first decode that succeeds.
+- **Majority voting:** each data module is sampled over a 3×3 grid in its central
+  ~40% (offsets `0.3 / 0.5 / 0.7`) instead of one pixel, averaging out
+  moiré/glare at module centers.
+
+---
+
 ## Build
 
 ```

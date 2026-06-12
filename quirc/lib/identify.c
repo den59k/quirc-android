@@ -295,7 +295,7 @@ static uint8_t otsu(const struct quirc *q)
 	// Calculate histogram
 	unsigned int histogram[UINT8_MAX + 1];
 	(void)memset(histogram, 0, sizeof(histogram));
-	uint8_t* ptr = q->image;
+	uint8_t* ptr = q->gray ? q->gray : q->image;
 	unsigned int length = numPixels;
 	while (length--) {
 		uint8_t value = *ptr++;
@@ -690,13 +690,48 @@ static void measure_grid_size(struct quirc *q, int index)
 static int read_cell(const struct quirc *q, int index, int x, int y)
 {
 	const struct quirc_grid *qr = &q->grids[index];
-	struct quirc_point p;
+	/*
+	 * Голосование по нескольким точкам в центральной части модуля вместо
+	 * выборки одного пикселя. На фото с экрана муар/блики переворачивают
+	 * отдельные пиксели в центрах модулей; мажоритарная выборка по сетке
+	 * 3x3 (в пределах ~40% центра, чтобы не задеть соседние модули)
+	 * усредняет этот шум и заметно повышает читаемость данных.
+	 */
+	static const quirc_float_t offsets[3] = {
+		(quirc_float_t)0.3, (quirc_float_t)0.5, (quirc_float_t)0.7
+	};
+	int score = 0;
+	int u, v;
 
-	perspective_map(qr->c, x + (quirc_float_t)0.5, y + (quirc_float_t)0.5, &p);
-	if (p.y < 0 || p.y >= q->h || p.x < 0 || p.x >= q->w)
-		return 0;
+	for (v = 0; v < 3; v++) {
+		for (u = 0; u < 3; u++) {
+			struct quirc_point p;
 
-	return q->pixels[p.y * q->w + p.x] ? 1 : -1;
+			perspective_map(qr->c, x + offsets[u], y + offsets[v], &p);
+			if (p.y < 0 || p.y >= q->h || p.x < 0 || p.x >= q->w)
+				continue;
+
+			if (q->pixels[p.y * q->w + p.x])
+				score++;
+			else
+				score--;
+		}
+	}
+
+	/* score>0 => большинство чёрных => модуль установлен */
+	if (score > 0)
+		return 1;
+	if (score < 0)
+		return -1;
+	/* ничья — берём центральный пиксель как раньше */
+	{
+		struct quirc_point p;
+		perspective_map(qr->c, x + (quirc_float_t)0.5,
+				y + (quirc_float_t)0.5, &p);
+		if (p.y < 0 || p.y >= q->h || p.x < 0 || p.x >= q->w)
+			return 0;
+		return q->pixels[p.y * q->w + p.x] ? 1 : -1;
+	}
 }
 
 static int fitness_cell(const struct quirc *q, int index, int x, int y)
@@ -1078,7 +1113,7 @@ static void pixels_setup(struct quirc *q, uint8_t threshold)
 		q->pixels = (quirc_pixel_t *)q->image;
 	}
 
-	uint8_t* source = q->image;
+	uint8_t* source = q->gray ? q->gray : q->image;
 	quirc_pixel_t* dest = q->pixels;
 	int length = q->w * q->h;
 	while (length--) {
@@ -1100,9 +1135,13 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
     const int H = q->h;
     if (W <= 0 || H <= 0) return;
 
+    /* источник полутонов: q->pixels может алиасить q->image, поэтому всегда
+     * читаем из сохранённой копии q->gray (см. quirc_end). */
+    const uint8_t *gray = q->gray ? q->gray : q->image;
+
     // --- параметры ---
-    // t трактуем как k в Sauvola. Типично 0.34.
-    float k = (t > 0.0f && t < 1.0f) ? t : 0.34f;
+    // t трактуем как k в Wolf-Jolion. Типично 0.5.
+    float k = (t > 0.0f && t < 1.0f) ? t : 0.5f;
 
     // window_size: чуть более "осторожная" эвристика, чем min_dim/8
     if (window_size <= 0) {
@@ -1149,7 +1188,7 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
         uint64_t rowsum  = 0;
         uint64_t rowsum2 = 0;
 
-        const uint8_t *src = q->image + (size_t)(y - 1) * (size_t)W;
+        const uint8_t *src = gray + (size_t)(y - 1) * (size_t)W;
         uint64_t *dst  = integral  + (size_t)y * stride;
         uint64_t *dst2 = integral2 + (size_t)y * stride;
         uint64_t *prev  = integral  + (size_t)(y - 1) * stride;
@@ -1179,12 +1218,55 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
         return;
     }
 
-    // Sauvola constants
-    // Для 8-bit принято R=128.0 (иногда 64..128). 128 обычно норм для QR.
-    const double R = 128.0;
+    // Бинаризация Вольфа–Жолиона (Wolf-Jolion).
+    //
+    // Классический Sauvola (thresh = mean*(1 + k*(std/R - 1))) на фото с экрана
+    // страдает двумя бедами: 1) однородно-тёмные области крупнее окна
+    // «выедаются» в белое (центры finder-паттернов теряются); 2) на низком
+    // контрасте порог уползает. Вольф привязывает порог к глобальному минимуму
+    // яркости M и нормирует контраст на максимальное локальное СКО Rmax:
+    //
+    //     thresh = mean - k * (1 - std/Rmax) * (mean - M)
+    //
+    // В плоских тёмных зонах (std≈0, mean≈M) порог ≈ mean → пиксель остаётся
+    // ЧЁРНЫМ, поэтому центры finder'ов не выедаются. В плоских светлых зонах
+    // порог заметно ниже mean → остаются БЕЛЫМИ. Это устойчивее на муаре/бликах
+    // от экранов и низкоконтрастных QR.
     const double kd = (double)k;
 
-    // --- основной проход ---
+    // --- первый проход: глобальный минимум яркости и максимум локального СКО ---
+    double globalMin = 255.0;
+    double Rmax = 0.0;
+    for (int y = 0; y < H; ++y) {
+        int y1 = y - half; if (y1 < 0) y1 = 0;
+        int y2 = y + half; if (y2 >= H) y2 = H - 1;
+        const size_t y2p = (size_t)(y2 + 1);
+        const size_t y1p = (size_t)(y1);
+        for (int x = 0; x < W; ++x) {
+            int x1 = x - half; if (x1 < 0) x1 = 0;
+            int x2 = x + half; if (x2 >= W) x2 = W - 1;
+            const size_t x2p = (size_t)(x2 + 1);
+            const size_t x1p = (size_t)(x1);
+
+            const uint64_t sum   = integral[y2p*stride+x2p]  - integral[y1p*stride+x2p]
+                                 - integral[y2p*stride+x1p]  + integral[y1p*stride+x1p];
+            const uint64_t sumsq = integral2[y2p*stride+x2p] - integral2[y1p*stride+x2p]
+                                 - integral2[y2p*stride+x1p] + integral2[y1p*stride+x1p];
+            const uint32_t count = (uint32_t)((y2 - y1 + 1) * (x2 - x1 + 1));
+
+            const double mean = (double)sum / (double)count;
+            double var = ((double)sumsq / (double)count) - mean * mean;
+            if (var < 0.0) var = 0.0;
+            const double stddev = sqrt(var);
+            if (stddev > Rmax) Rmax = stddev;
+
+            const double pix = (double)gray[(size_t)y * (size_t)W + (size_t)x];
+            if (pix < globalMin) globalMin = pix;
+        }
+    }
+    if (Rmax < 1e-6) Rmax = 1.0; // защита от деления на ноль на плоском кадре
+
+    // --- второй проход: порог Вольфа и запись пикселей ---
     for (int y = 0; y < H; ++y) {
         int y1 = y - half; if (y1 < 0) y1 = 0;
         int y2 = y + half; if (y2 >= H) y2 = H - 1;
@@ -1208,7 +1290,7 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
             const uint64_t sumsq = integral2[A] - integral2[B] - integral2[C] + integral2[D];
 
             const uint32_t count = (uint32_t)((y2 - y1 + 1) * (x2 - x1 + 1));
-            const uint8_t pix = q->image[(size_t)y * (size_t)W + (size_t)x];
+            const uint8_t pix = gray[(size_t)y * (size_t)W + (size_t)x];
 
             // mean & stddev
             const double mean = (double)sum / (double)count;
@@ -1216,8 +1298,8 @@ static void adaptive_binarize(struct quirc *q, int window_size, float t)
             if (var < 0.0) var = 0.0; // численная защита
             const double stddev = sqrt(var);
 
-            // Sauvola threshold
-            const double thresh = mean * (1.0 + kd * (stddev / R - 1.0));
+            // Порог Вольфа–Жолиона
+            const double thresh = mean - kd * (1.0 - stddev / Rmax) * (mean - globalMin);
 
             // Запись (QR обычно: тёмное <= thresh => BLACK)
             q->pixels[(size_t)y * (size_t)W + (size_t)x] =
@@ -1268,10 +1350,15 @@ uint8_t *quirc_begin(struct quirc *q, int *w, int *h)
 
 void quirc_end(struct quirc *q) {
     static const struct { int win; float k; } passes[] = {
-        {  0, 0.34f },   // авто-окно
-        { 41, 0.34f },   // крупное фиксированное (близкий QR, лечит выедание finder)
-        {  0, 0.18f },   // мягче к фону (бледный/низкоконтрастный QR)
+        {  0, 0.50f },   // авто-окно, стандартный Wolf
+        { 41, 0.50f },   // крупное фиксированное (близкий QR)
+        {  0, 0.30f },   // мягче (бледный/низкоконтрастный QR)
     };
+    /* Сохраняем исходные полутона: при QUIRC_PIXEL_ALIAS_IMAGE буфер pixels
+     * алиасит image, и первый же проход бинаризации затрёт полутона. Все
+     * последующие проходы и считывание модулей работают по q->gray. */
+    if (q->gray && q->image)
+        (void)memcpy(q->gray, q->image, (size_t)q->w * (size_t)q->h);
     for (size_t p = 0; p < sizeof(passes)/sizeof(*passes); ++p) {
         quirc_reset_state(q);
         adaptive_binarize(q, passes[p].win, passes[p].k);

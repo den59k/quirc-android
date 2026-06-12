@@ -3,3 +3,6 @@
 /.cxx
 /.gradle
 /build
+
+/src/tests/.claude
+/src/tests/build
